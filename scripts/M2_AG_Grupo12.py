@@ -14,9 +14,11 @@ def _():
     import seaborn as sns
     import numpy as np
     from matplotlib import pyplot as plt
-    from typing import Literal, get_args, TypeAlias, Optional, TypedDict, Dict
+    from typing import Literal, get_args, TypeAlias, Optional, TypedDict, Dict, Any
     from great_tables import GT, style, md
     import re
+    from functools import cached_property
+    from plotnine import ggplot, aes, geom_point, geom_smooth, theme_minimal, labs, scale_color_manual
 
     # Logging configuration
     logging.basicConfig(
@@ -26,10 +28,7 @@ def _():
     )
     logger = logging.getLogger(__name__)
 
-    # Parameters
-    LOCAL_PATH_TO_SALES_CSV = "./data/sales_update202504.csv"
-
-    # Styling
+    # Styling configuration
     StylePresetKey = Literal["default", "alert", "soft_pink"]
 
 
@@ -42,20 +41,35 @@ def _():
         "default": {"style": 1, "style_color": "gray"},
         "alert": {"style": 3, "style_color": "red"},
         "soft_pink": {"style": 4, "style_color": "pink"},
-        "bluey": {"style": 6, "style_color": "blue"},
+        "bluey": {"style": 1, "style_color": "blue"},
         "forest": {"style": 2, "style_color": "green"},
     }
+
+    # Parameters
+    LOCAL_PATH_TO_SALES_CSV = "./data/sales_update202504.csv"
+    TABLE_STYLE_FOR_NB = "bluey"
     return (
+        Any,
         Dict,
         GT,
-        LOCAL_PATH_TO_SALES_CSV,
+        Literal,
         Optional,
         STYLE_PRESETS,
         StylePresetKey,
+        TABLE_STYLE_FOR_NB,
+        aes,
+        cached_property,
+        geom_point,
+        geom_smooth,
+        get_args,
+        ggplot,
+        labs,
+        logger,
         md,
         mo,
         pd,
         pl,
+        plt,
         re,
     )
 
@@ -64,6 +78,101 @@ def _():
 def _(mo):
     mo.md(r"""## Funciones Auxiliares""")
     return
+
+
+@app.function
+def github_file_url(owner: str, repo: str, file: str, branch: str = "master") -> str:
+    """
+    Generate the direct URL to a raw file hosted in a GitHub repository.
+
+    Args:
+        owner (str): GitHub username or organization that owns the repository.
+        repo (str): Name of the GitHub repository.
+        file (str): Path to the file within the repository.
+        branch (str): Branch where the file is located (default is 'master').
+
+    Returns:
+        str: URL to access the raw file directly.
+    """
+    return f"https://github.com/{owner}/{repo}/blob/{branch}/{file}?raw=true"
+
+
+@app.cell
+def _(Any, Dict, Literal, get_args, logger, pl):
+    FetchStrategy = Literal["local", "remote", "local_then_remote"]
+
+
+    def load_data(
+        local_path: str,
+        remote_path: str,
+        fetch_strategy: FetchStrategy = "local_then_remote",
+        csv_read_args: Dict[str, Any] = None,
+    ) -> pl.LazyFrame:
+        """
+        Generic lazy CSV loader with flexible fetch strategies.
+
+        Args:
+            local_path (str): Path to local CSV file.
+            remote_path (str): URL to remote CSV file.
+            fetch_strategy (FetchStrategy): 'local', 'remote', or 'local_then_remote'.
+            csv_read_args (dict, optional): Additional arguments to pass to Polars CSV reader.
+
+        Returns:
+            LazyFrame: Polars LazyFrame representing the loaded CSV.
+
+        Raises:
+            ValueError: If fetch_strategy is invalid.
+            FileNotFoundError: If 'local' strategy and local file missing.
+        """
+
+        if csv_read_args is None:
+            csv_read_args = {
+                "separator": ";",
+                "decimal_comma": True,
+                "encoding": "latin1",
+            }
+
+        if fetch_strategy == "local":
+            logger.info(f"Fetching CSV lazily from local source at: '{local_path}'")
+            try:
+                with open(local_path, "r"):
+                    pass
+                logger.info(f"Local file found and loading: '{local_path}'")
+            except FileNotFoundError:
+                raise FileNotFoundError(f"Local file not found at: '{local_path}'")
+            return pl.scan_csv(source=local_path, **csv_read_args)
+
+        elif fetch_strategy == "remote":
+            logger.info(f"Fetching CSV lazily from remote source at: {remote_path}")
+            return pl.scan_csv(source=remote_path, **csv_read_args)
+
+        elif fetch_strategy == "local_then_remote":
+            try:
+                lf = load_data(
+                    local_path=local_path,
+                    remote_path=remote_path,
+                    fetch_strategy="local",
+                    csv_read_args=csv_read_args,
+                )
+                logger.info(f"SUCCESSFULLY loaded local file: '{local_path}'")
+                return lf
+            except FileNotFoundError:
+                logger.warning(f"Local file not found at: '{local_path}', falling back to remote.")
+                lf = load_data(
+                    local_path=local_path,
+                    remote_path=remote_path,
+                    fetch_strategy="remote",
+                    csv_read_args=csv_read_args,
+                )
+                logger.info(f"SUCCESSFULLY loaded remote file: '{remote_path}'")
+                return lf
+
+        else:
+            raise ValueError(
+                f"Invalid fetch_strategy: {fetch_strategy!r}. "
+                f"Expected one of: {', '.join(repr(s) for s in get_args(FetchStrategy))}."
+            )
+    return (load_data,)
 
 
 @app.cell
@@ -121,11 +230,7 @@ def _(pl):
             lf.null_count()
             .unpivot(variable_name="variable", value_name="null_count")
             .sort(by="null_count", descending=True)
-            .with_columns(
-                (pl.col("null_count") / height_expr * 100)
-                .round(2)
-                .alias("null_percentage")
-            )
+            .with_columns((pl.col("null_count") / height_expr * 100).round(2).alias("null_percentage"))
             .lazy()
         )
     return (make_null_count_lf,)
@@ -180,42 +285,42 @@ def _(
         style: StylePresetKey = "default",
     ) -> GT:
         """
-            Generate a styled Great Tables (GT) table summarizing null counts and percentages per column.
+        Generate a styled Great Tables (GT) table summarizing null counts and percentages per column.
 
-            This function calculates null value statistics for each column in the provided Polars LazyFrame,
-            returning a GT table with:
-              - Null value counts per column.
-              - Null value percentages relative to the total row count.
+        This function calculates null value statistics for each column in the provided Polars LazyFrame,
+        returning a GT table with:
+          - Null value counts per column.
+          - Null value percentages relative to the total row count.
 
-            The table supports flexible customization for titles, column labels, number formatting,
-            percentage formatting, color gradients, and visual style presets.
+        The table supports flexible customization for titles, column labels, number formatting,
+        percentage formatting, color gradients, and visual style presets.
 
-            Args:
-                lf (pl.LazyFrame): Polars LazyFrame to analyze.
-                title (str, optional): Markdown-formatted table title. Defaults to a descriptive Spanish title.
-                subtitle (str, optional): Markdown-formatted table subtitle.
-                metric_label (str, optional): Label for the variable/column name column.
-                null_count_label (str, optional): Label for the null count column.
-                null_percentage_label (str, optional): Label for the null percentage column.
-                null_count_decimals (int, optional): Number of decimals for null count formatting.
-                null_percentage_scale_values (bool, optional): Whether to scale percentage values before formatting.
-                null_percentage_drop_trailing_zeros (bool, optional): Whether to drop trailing zeros in percentages.
-                null_percentage_palette (list[str], optional): Color gradient palette for the null percentage column.
-                    Defaults to ["lightgreen", "lightyellow", "crimson"].
-                stylet (StylePresetKey, optional): Key selecting a predefined style preset controlling
-                    the table outline color and GT styling options. Defaults to "default".
+        Args:
+            lf (pl.LazyFrame): Polars LazyFrame to analyze.
+            title (str, optional): Markdown-formatted table title. Defaults to a descriptive Spanish title.
+            subtitle (str, optional): Markdown-formatted table subtitle.
+            metric_label (str, optional): Label for the variable/column name column.
+            null_count_label (str, optional): Label for the null count column.
+            null_percentage_label (str, optional): Label for the null percentage column.
+            null_count_decimals (int, optional): Number of decimals for null count formatting.
+            null_percentage_scale_values (bool, optional): Whether to scale percentage values before formatting.
+            null_percentage_drop_trailing_zeros (bool, optional): Whether to drop trailing zeros in percentages.
+            null_percentage_palette (list[str], optional): Color gradient palette for the null percentage column.
+                Defaults to ["lightgreen", "lightyellow", "crimson"].
+            stylet (StylePresetKey, optional): Key selecting a predefined style preset controlling
+                the table outline color and GT styling options. Defaults to "default".
 
-            Returns:
-                GT: A styled GT table presenting null counts and percentages, ready for display or export.
+        Returns:
+            GT: A styled GT table presenting null counts and percentages, ready for display or export.
 
-            Notes:
-                - Internally calls `make_null_count_lf` to compute null statistics lazily.
-                - Collecting the LazyFrame triggers data execution before GT rendering.
-                - Conditional coloring is applied to the null percentage column based on the color palette.
-                - Style presets unify table aesthetics across different usages.
+        Notes:
+            - Internally calls `make_null_count_lf` to compute null statistics lazily.
+            - Collecting the LazyFrame triggers data execution before GT rendering.
+            - Conditional coloring is applied to the null percentage column based on the color palette.
+            - Style presets unify table aesthetics across different usages.
 
-            References:
-                - Great Tables documentation: https://posit-dev.github.io/great-tables/articles/intro.html
+        References:
+            - Great Tables documentation: https://posit-dev.github.io/great-tables/articles/intro.html
         """
         if null_percentage_palette is None:
             null_percentage_palette = ["lightgreen", "lightyellow", "crimson"]
@@ -258,7 +363,7 @@ def _(
     def gt_dims(
         lf: pl.LazyFrame,
         title: str = "**Dimensiones del dataset**",
-        subtitle: str = "Número total de observaciones (filas) y variables (columnas)",
+        subtitle: str = "Número total de observaciones y variables",
         metric_label: str = "Métrica",
         value_label: str = "Valor",
         style: StylePresetKey = "default",
@@ -302,7 +407,6 @@ def _(
             .opt_table_outline()
             .opt_stylize(style=preset["style"], color=preset["style_color"])
         )
-
     return (gt_dims,)
 
 
@@ -377,12 +481,8 @@ def _(pd, pl):
         """
         total_count = series.len()
 
-        result = series.value_counts(
-            name=count_col_alias, sort=sort, parallel=parallel
-        ).with_columns(
-            (pl.col(count_col_alias) / total_count)
-            .round(decimals)
-            .alias(proportion_col_alias),
+        result = series.value_counts(name=count_col_alias, sort=sort, parallel=parallel).with_columns(
+            (pl.col(count_col_alias) / total_count).round(decimals).alias(proportion_col_alias),
             pl.col(count_col_alias).cum_sum().alias(cum_count_col_alias),
             (pl.col(count_col_alias).cum_sum() / total_count)
             .round(decimals)
@@ -394,69 +494,68 @@ def _(pd, pl):
 
 
 @app.cell
-def _(Dict, Optional, pl, re):
+def _(Dict, Optional, cached_property, load_data, pl, re):
     class LazyCSVLoader:
         """
         Lazy CSV loader using Polars with optional schema typing, decimal comma support,
-        and snake_case renaming.
+        snake_case renaming, and support for local and/or remote CSV paths.
 
         Args:
-            path (str): Path to CSV file.
+            local_path (Optional[str]): Path to local CSV file.
+            remote_path (Optional[str]): URL to remote CSV file.
             separator (str, optional): CSV delimiter (default ',').
             dtypes (Optional[Dict[str, pl.DataType]]): Optional schema mapping column names to Polars types.
             use_decimal_comma (bool, optional): If True, parses decimals with comma (e.g. "3,14" as 3.14).
-
-        Methods:
-            fetch_lf() -> pl.LazyFrame:
-                Returns Polars LazyFrame with optional schema types and decimal comma support.
-            fetch_schema() -> pl.Schema:
-                Returns schema of CSV.
-            fetch_col_names() -> list[str]:
-                Returns list of column names.
-            to_snake_case(name: str) -> str:
-                Converts string to snake_case (static method).
-            fetch_lf_renamed() -> pl.LazyFrame:
-                Returns LazyFrame with columns renamed to snake_case.
         """
+
         def __init__(
-            self, 
-            path: str, 
-            separator: str = ',', 
+            self,
+            local_path: Optional[str] = None,
+            remote_path: Optional[str] = None,
+            separator: str = ",",
             dtypes: Optional[Dict[str, pl.DataType]] = None,
             use_decimal_comma: bool = False,
         ):
-            self.path = path
+            if local_path is None and remote_path is None:
+                raise ValueError("Either local_path or remote_path must be provided.")
+
+            self.local_path = local_path
+            self.remote_path = remote_path
             self.separator = separator
             self.dtypes = dtypes
             self.use_decimal_comma = use_decimal_comma
-    
-        def fetch_lf(self) -> pl.LazyFrame:
-            """Return a Polars LazyFrame for the CSV, applying dtypes and decimal comma if provided."""
-            return pl.scan_csv(
-                self.path,
-                separator=self.separator,
-                schema_overrides=self.dtypes,
-                decimal_comma=self.use_decimal_comma,
+
+        @cached_property
+        def lazyframe(self) -> pl.LazyFrame:
+            """A lazily evaluated Polars LazyFrame loaded from local or remote CSV."""
+            return load_data(
+                local_path=self.local_path or "",
+                remote_path=self.remote_path or "",
+                fetch_strategy="local_then_remote",
+                csv_read_args={
+                    "separator": self.separator,
+                    "decimal_comma": self.use_decimal_comma,
+                    "schema_overrides": self.dtypes,
+                },
             )
-    
-        def fetch_schema(self) -> pl.Schema:
+
+        def schema(self) -> pl.Schema:
             """Return the schema of the CSV as a Polars Schema object."""
-            return self.fetch_lf().collect_schema()
-    
-        def fetch_col_names(self) -> list[str]:
+            return self.lazyframe.collect_schema()
+
+        def column_names(self) -> list[str]:
             """Return a list of column names from the CSV schema."""
-            return self.fetch_schema().names()
+            return self.schema().names()
 
         @staticmethod
         def to_snake_case(name: str) -> str:
             """Convert a string to snake_case."""
             return re.sub(r"[\s\-]+", "_", name.strip().lower())
-    
-        def fetch_lf_renamed(self) -> pl.LazyFrame:
+
+        def renamed_to_snake_case(self) -> pl.LazyFrame:
             """Return a LazyFrame with columns renamed to snake_case."""
-            lf = self.fetch_lf()
-            rename_map = {col: self.to_snake_case(col) for col in self.fetch_col_names()}
-            return lf.rename(rename_map)
+            rename_map = {col: self.to_snake_case(col) for col in self.column_names()}
+            return self.lazyframe.rename(rename_map)
     return (LazyCSVLoader,)
 
 
@@ -467,12 +566,14 @@ def _(mo):
 
 
 @app.cell
-def _(LOCAL_PATH_TO_SALES_CSV, LazyCSVLoader):
-    lazy_loader = LazyCSVLoader(
-        path=LOCAL_PATH_TO_SALES_CSV, use_decimal_comma=True, separator=";"
+def _(LazyCSVLoader):
+    sales_lf_loader = LazyCSVLoader(
+        remote_path=github_file_url(owner="jxareas", repo="data", file="sales_update202504.csv"),
+        separator=";",
+        use_decimal_comma=True,
     )
 
-    sales_lf = lazy_loader.fetch_lf_renamed()
+    sales_lf = sales_lf_loader.renamed_to_snake_case()
 
     sales_lf.head(n=10).collect()
     return (sales_lf,)
@@ -491,11 +592,11 @@ def _(mo):
 
 
 @app.cell
-def _(gt_dims, sales_lf):
+def _(TABLE_STYLE_FOR_NB, gt_dims, sales_lf):
     gt_dims(
         lf=sales_lf,
-        title="**Dimensión del dataset de ventas**",
-        style="forest",
+        title="**Dimensiones del dataset de `ventas`**",
+        style=TABLE_STYLE_FOR_NB,
     )
     return
 
@@ -507,12 +608,75 @@ def _(mo):
 
 
 @app.cell
-def _(gt_null_counts, sales_lf):
+def _(TABLE_STYLE_FOR_NB, gt_null_counts, sales_lf):
     gt_null_counts(
         lf=sales_lf,
-        title="**Valores nulos en el dataset de ventas**",
-        style="forest",
+        title="**Valores nulos de `ventas`**",
+        style=TABLE_STYLE_FOR_NB,
     )
+    return
+
+
+@app.cell
+def _(aes, geom_point, geom_smooth, ggplot, labs, sales_lf):
+    sales_df = sales_lf.collect()
+
+    (
+        ggplot(sales_df, aes(x="inversion", y="ventas"))
+        + geom_point(color="#1f78b4", size=3)
+        + geom_smooth(method="lm", se=True, color="#e31a1c", fill="#fb9a99", alpha=0.4)
+        + labs(title="Ventas vs Inversion", x="Inversion (investment)", y="Ventas (sales)")
+    ).show()
+    return (sales_df,)
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""## Modelo de regresión lineal""")
+    return
+
+
+@app.cell
+def _(sales_df):
+    # Should we use statsmodels with its built-in Wilkinson-Rogers notation for SLR? (ventas ~ inversion)
+    import statsmodels.formula.api as smf
+
+    model = smf.ols("ventas ~ inversion", data=sales_df).fit()
+
+    model.summary()
+    return (model,)
+
+
+@app.cell
+def _(model, plt):
+    import statsmodels.api as sm
+
+    fig = sm.graphics.plot_regress_exog(model, "inversion")
+    plt.show()
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""## ¿Cuántas ventas se obtendrían si se invirtiesen 7 millones de euros?""")
+    return
+
+
+@app.cell
+def _():
+    ## TBD. Replace 7 in the explanatory variable
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""## Evaluar el modelo a través de la SCE y el coeficiente de determinación. (5%)""")
+    return
+
+
+@app.cell
+def _():
+    ## TBD.
     return
 
 

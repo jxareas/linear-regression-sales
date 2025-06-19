@@ -5,10 +5,64 @@ app = marimo.App(width="medium")
 
 
 @app.cell
-def _():
+def _(get_ipython):
+    import sys
+    import subprocess
+    import os
+    import logging
+
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s"
+    )
+
+    try:
+        if 'google.colab' in str(get_ipython()):
+            logging.info("Running in Google Colab.")
+
+            # Installing required packages
+            logging.info("Installing required packages...")
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "polars", "pandas", "seaborn", "matplotlib", "plotnine", "great-tables"],
+                capture_output=True,
+                text=True
+            )
+            logging.info(f"Pip install output:\n{result.stdout}")
+            if result.stderr:
+                logging.warning(f"Pip install errors:\n{result.stderr}")
+
+            # Creating data directory if it doesn't exist
+            data_dir = "data"
+            os.makedirs(data_dir, exist_ok=True)
+            logging.info(f"Ensured '{data_dir}' directory exists.")
+
+            # Downloading sales CSV file only if it doesn't exist
+            file_path = os.path.join(data_dir, "sales_update202504.csv")
+
+            if not os.path.exists(file_path):
+                logging.info(f"File '{file_path}' not found. Downloading...")
+                result = subprocess.run(
+                    ["wget", "-O", file_path,
+                     "https://github.com/jxareas/data/blob/master/sales_update202504.csv?raw=true"],
+                    capture_output=True,
+                    text=True
+                )
+                logging.info(f"Wget output:\n{result.stdout}")
+                if result.stderr:
+                    logging.warning(f"Wget errors:\n{result.stderr}")
+            else:
+                logging.info(f"File '{file_path}' already exists. Skipping download.")
+    except NameError:
+        logging.warning("Not running in an IPython/Colab environment. Skipping package installation.")
+
+    return (logging,)
+
+
+@app.cell
+def _(logging):
     # Libraries
     import marimo as mo
-    import logging
     import polars as pl
     import pandas as pd
     import seaborn as sns
@@ -52,6 +106,7 @@ def _():
         Any,
         Dict,
         GT,
+        LOCAL_PATH_TO_SALES_CSV,
         Literal,
         Optional,
         STYLE_PRESETS,
@@ -566,8 +621,9 @@ def _(mo):
 
 
 @app.cell
-def _(LazyCSVLoader):
+def _(LOCAL_PATH_TO_SALES_CSV, LazyCSVLoader):
     sales_lf_loader = LazyCSVLoader(
+        local_path=LOCAL_PATH_TO_SALES_CSV,
         remote_path=github_file_url(owner="jxareas", repo="data", file="sales_update202504.csv"),
         separator=";",
         use_decimal_comma=True,
